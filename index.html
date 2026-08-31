@@ -239,6 +239,99 @@ if("serviceWorker" in navigator){window.addEventListener("load",()=>navigator.se
 </script>
 </body>
 </html>
+erHTML="";
+const form=document.createElement("form");form.id="dataForm";
+sections.forEach(sec=>{
+const card=document.createElement("section");card.className="card";card.innerHTML=`<h2>${escapeHtml(sec.title)}</h2><div class="desc">${escapeHtml(sec.desc)}</div>`;
+const grid=document.createElement("div");grid.className="grid";
+sec.fields.forEach(f=>{
+const wrap=document.createElement("div");wrap.className="field"+(f.full?" full":"");
+const lab=document.createElement("label");lab.textContent=f.label;if(f.req)lab.className="req";
+let el;
+if(f.type==="select"){el=document.createElement("select");el.name=f.name;el.innerHTML='<option value="">Select...</option>'+f.options.map(o=>`<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("")}
+else{el=document.createElement("input");el.name=f.name;el.type=f.type||"text";if(f.type==="number"){el.min="0";el.step="1"}}
+el.required=!!f.req;el.autocomplete="off";el.addEventListener("input",updateProgress);el.addEventListener("change",updateProgress);
+
+// --- MODIFIED DOM LOGIC FOR GPS FIELD START ---
+if (f.name === "gps_coordinates") {
+  const group = document.createElement("div");
+  group.className = "input-group";
+  const gpsBtn = document.createElement("button");
+  gpsBtn.type = "button";
+  gpsBtn.className = "btn primary"; 
+  gpsBtn.style.padding = "12px";
+  gpsBtn.style.whiteSpace = "nowrap";
+  gpsBtn.innerHTML = "📍 Get GPS";
+  gpsBtn.onclick = () => captureGPS(el, gpsBtn);
+  group.append(el, gpsBtn);
+  wrap.append(lab, group);
+} else {
+  wrap.append(lab, el);
+}
+// --- MODIFIED DOM LOGIC FOR GPS FIELD END ---
+
+if(f.hint){const s=document.createElement("small");s.textContent=f.hint;wrap.append(s)}grid.appendChild(wrap)
+});
+card.appendChild(grid);form.appendChild(card)
+});
+const actions=document.createElement("div");actions.className="actions";
+actions.innerHTML=`<button type="button" class="btn secondary" onclick="saveOfflineRecord()">Save ${current==="teacher"?"Teacher":"School"} Record</button><button type="button" class="btn secondary" onclick="newRecord()">Add Another ${current==="teacher"?"Teacher":"School"}</button><button type="submit" class="btn primary" style="margin-left:auto">Send Online</button>`;
+form.appendChild(actions);app.appendChild(form);form.addEventListener("submit",submitForm);updateProgress()
+}
+
+function getData(){const data={form_type:current};document.querySelectorAll("#dataForm [name]").forEach(el=>data[el.name]=el.value.trim());return data}
+function clearForm(){document.querySelectorAll("#dataForm [name]").forEach(el=>el.value="");updateProgress()}
+function newRecord(){clearForm();showStatus(`Ready for another ${current==="teacher"?"teacher":"school"} record. Saved records are kept.`,"ok")}
+function updateProgress(){const inputs=[...document.querySelectorAll("#dataForm [name]")],filled=inputs.filter(x=>x.value).length;document.getElementById("progressBar").style.width=(inputs.length?Math.round(filled/inputs.length*100):0)+"%"}
+function showStatus(msg,type){const s=document.getElementById("status");s.textContent=msg;s.className="status "+type;window.scrollTo({top:0,behavior:"smooth"})}
+
+function saveOfflineRecord(){
+const form=document.getElementById("dataForm");if(!form.reportValidity())return;
+const data=getData();data.local_id=uid();data.saved_at=new Date().toISOString();data.sync_status="pending";
+const q=getQueue();q.push(data);setQueue(q);clearForm();showStatus(`${current==="teacher"?"Teacher":"School"} record saved offline. It is now visible under Offline Records.`,"ok")
+}
+
+function renderQueue(){
+const box=document.getElementById("queueBox");if(!box)return;
+const q=getQueue(),mine=q.filter(r=>r.form_type===current),pending=q.filter(r=>r.sync_status==="pending");
+box.innerHTML=`<section class="card"><h2>Offline Records</h2><div class="desc">Records saved on this phone. They remain here until Google Sheets confirms the upload.</div><div><b>${q.length}</b> total saved • <b>${pending.length}</b> pending sync</div>${mine.length?mine.map((r,i)=>{const name=current==="teacher"?(r.name_father_name||`Teacher ${i+1}`):(r.school_name||`School ${i+1}`);return `<div class="queue-item">${escapeHtml(name)} — ${r.sync_status==="synced"?"🟢 Synced":"🟠 Pending"}${r.sync_status==="pending"?` <button type="button" class="btn danger" style="float:right;padding:5px 9px" onclick="deleteRecord('${escapeHtml(r.local_id)}')">Delete</button>`:""}</div>`}).join(""):"<p class='note'>No saved records yet.</p>"}<div class="queue-actions"><button type="button" class="btn primary" onclick="syncPending()" ${pending.length?"":"disabled"}>Sync Pending Records (${pending.length})</button></div></section>`
+}
+function deleteRecord(id){if(confirm("Delete this saved record?"))setQueue(getQueue().filter(r=>r.local_id!==id))}
+
+async function sendRecordToGoogle(record){
+if(!APPS_SCRIPT_URL)throw new Error("Apps Script URL is not configured.");
+const response=await fetch(APPS_SCRIPT_URL,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify(record),keepalive:true});
+return true
+}
+
+async function syncPending(){
+const pending=getQueue().filter(r=>r.sync_status==="pending");
+if(!pending.length){showStatus("No pending records to sync.","ok");return}
+if(!navigator.onLine){showStatus("Internet is off. Records remain safely on this device.","err");return}
+showStatus(`Syncing ${pending.length} record(s)...`,"ok");let ok=0,fail=0;
+for(const record of pending){try{await sendRecordToGoogle(record);const q=getQueue();const item=q.find(x=>x.local_id===record.local_id);if(item){item.sync_status="synced";item.synced_at=new Date().toISOString()}setQueue(q);ok++}catch(e){fail++}}
+showStatus(fail?`Sync finished: ${ok} sent, ${fail} still pending.`:`Success! ${ok} record(s) sent to Google Sheets.`,fail?"err":"ok")
+}
+
+async function submitForm(e){
+e.preventDefault();const form=e.target;if(!form.reportValidity())return;
+const data=getData();data.local_id=uid();data.submitted_at=new Date().toISOString();
+if(!navigator.onLine){data.saved_at=new Date().toISOString();data.sync_status="pending";const q=getQueue();q.push(data);setQueue(q);clearForm();showStatus("No internet. Record saved offline and will be synced later.","ok");return}
+const btn=form.querySelector('button[type="submit"]');btn.disabled=true;btn.textContent="Sending...";
+try{await sendRecordToGoogle(data);clearForm();showStatus("Record sent to Google Sheets.","ok")}
+catch(err){data.saved_at=new Date().toISOString();data.sync_status="pending";const q=getQueue();q.push(data);setQueue(q);clearForm();showStatus("Connection failed. Record was saved offline for later sync.","ok")}
+btn.disabled=false;btn.textContent="Send Online"
+}
+
+window.addEventListener("online",()=>{if(getQueue().some(r=>r.sync_status==="pending"))setTimeout(syncPending,1000)});
+render();renderQueue();
+</script>
+<footer class="footer">Created by Dayanand</footer>
+<script>
+if("serviceWorker" in navigator){window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js").catch(()=>{}))}
+</script>
+</body>
+</html>
 "}}
 el.required=!!f.req;el.autocomplete="off";el.addEventListener("input",updateProgress);el.addEventListener("change",updateProgress);
 wrap.append(lab,el);if(f.hint){const s=document.createElement("small");s.textContent=f.hint;wrap.append(s)}grid.appendChild(wrap)
